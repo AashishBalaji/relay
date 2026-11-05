@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project (with dev deps)
+        run: pip install --no-cache-dir -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest tests/unit -v
+
+      - name: Contract tests (live JSONPlaceholder, fixture-based GitHub)
+        run: pytest tests/contract -v -m live
+
+  docker-smoke-test:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t relay:ci .
+
+      - name: Live smoke test (drift-check against JSONPlaceholder)
+        # Real network call, so bound the retries instead of trusting the
+        # first attempt or looping forever on a flaky runner -- same lesson
+        # carried over from this portfolio's Ledger project.
+        run: |
+          max_attempts=3
+          attempt=1
+          until docker run --rm relay:ci drift-check \
+              /usr/local/lib/python3.12/site-packages/relay/connectors/jsonplaceholder/manifest.yaml; do
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::drift-check smoke test failed after $max_attempts attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt failed, retrying ($((attempt + 1))/$max_attempts)..."
+            attempt=$((attempt + 1))
+            sleep 5
+          done

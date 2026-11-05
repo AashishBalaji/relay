@@ -1,0 +1,76 @@
+name: jsonplaceholder
+version: "1.0.0"
+base_url: "https://jsonplaceholder.typicode.com"
+auth:
+  type: none
+rate_limit_per_window: 10
+rate_limit_window_seconds: 1.0
+max_retries: 3
+endpoints:
+  - name: list_posts
+    method: GET
+    path: /posts
+    pagination:
+      style: page
+      param_name: _page
+      page_size_param: _limit
+      page_size: 10
+    fields:
+      id:
+        source_path: id
+        required: true
+        type_hint: integer
+      user_id:
+        source_path: userId
+        required: true
+        type_hint: integer
+      title:
+        source_path: title
+        required: true
+        type_hint: string
+      body:
+        source_path: body
+        required: true
+        type_hint: string
+
+  - name: get_post
+    method: GET
+    path: /posts/{post_id}
+    fields:
+      id:
+        source_path: id
+        required: true
+        type_hint: integer
+      user_id:
+        source_path: userId
+        required: true
+        type_hint: integer
+      title:
+        source_path: title
+        required: true
+        type_hint: string
+      body:
+        source_path: body
+        required: true
+        type_hint: string
+
+  - name: list_comments_for_post
+    method: GET
+    path: /posts/{post_id}/comments
+    fields:
+      id:
+        source_path: id
+        required: true
+        type_hint: integer
+      post_id:
+        source_path: postId
+        required: true
+        type_hint: integer
+      name:
+        source_path: name
+        required: true
+        type_hint: string
+      email:
+        source_path: email
+        required: true
+        type_hint: string

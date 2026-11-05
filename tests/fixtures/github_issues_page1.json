@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "number": 1347,
+    "title": "Found a bug",
+    "state": "open",
+    "user": {"login": "octocat", "id": 1}
+  },
+  {
+    "id": 2,
+    "number": 1348,
+    "title": "Docs out of date",
+    "state": "closed",
+    "user": {"login": "monalisa", "id": 2}
+  }
+]

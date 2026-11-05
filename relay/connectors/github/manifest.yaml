@@ -1,0 +1,41 @@
+name: github
+version: "1.0.0"
+base_url: "https://api.github.com"
+auth:
+  type: oauth2
+  token_url: "https://github.com/login/oauth/access_token"
+  grant_type: authorization_code
+  scopes: ["repo"]
+rate_limit_per_window: 5
+rate_limit_window_seconds: 1.0
+max_retries: 3
+endpoints:
+  - name: list_repo_issues
+    method: GET
+    path: /repos/{owner}/{repo}/issues
+    pagination:
+      style: page
+      param_name: page
+      page_size_param: per_page
+      page_size: 30
+    fields:
+      id:
+        source_path: id
+        required: true
+        type_hint: integer
+      number:
+        source_path: number
+        required: true
+        type_hint: integer
+      title:
+        source_path: title
+        required: true
+        type_hint: string
+      state:
+        source_path: state
+        required: true
+        type_hint: string
+      author_login:
+        source_path: user.login
+        required: true
+        type_hint: string
