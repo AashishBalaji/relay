@@ -69,3 +69,45 @@ def test_unknown_path_returns_404():
     with MockServer(_manifest(endpoint)) as server:
         r = httpx.get(f"{server.base_url}/nonexistent")
         assert r.status_code == 404
+
+
+def test_list_endpoint_with_path_param_and_pagination_is_not_treated_as_single_object():
+    """A path placeholder alone doesn't mean "get one" -- a list endpoint
+    nested under a path param (e.g. /repos/{owner}/{repo}/issues) must
+    still page normally, not collapse to one object."""
+    pagination = PaginationSpec(style="page", param_name="page")
+    endpoint = EndpointSpec(
+        name="list_issues", path="/repos/{owner}/issues", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", type_hint="integer")},
+    )
+    with MockServer(_manifest(endpoint), pages=2) as server:
+        body = httpx.get(f"{server.base_url}/repos/acme/issues", params={"page": 1}).json()
+        assert isinstance(body, list)
+        assert len(body) == 5
+
+
+def test_get_request_to_post_only_endpoint_path_returns_404_not_200():
+    endpoint = EndpointSpec(
+        name="create_item", method="POST", path="/items",
+        fields={"id": FieldMapping(source_path="id")},
+    )
+    with MockServer(_manifest(endpoint)) as server:
+        r = httpx.get(f"{server.base_url}/items")
+        assert r.status_code == 404
+
+
+def test_cursor_pagination_without_items_path_advertises_next_cursor():
+    """Without items_path, ConnectorClient's _extract_items treats a dict
+    body as a SINGLE item -- so the next cursor has to live in that same
+    dict, not get silently dropped the way it used to."""
+    pagination = PaginationSpec(style="cursor", param_name="cursor", next_token_path="next")
+    endpoint = EndpointSpec(
+        name="list", path="/items", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", type_hint="integer")},
+    )
+    with MockServer(_manifest(endpoint), pages=2) as server:
+        first = httpx.get(f"{server.base_url}/items").json()
+        assert first["next"] == "1"
+        assert first["id"] == 0
+        second = httpx.get(f"{server.base_url}/items", params={"cursor": "1"}).json()
+        assert second["next"] is None

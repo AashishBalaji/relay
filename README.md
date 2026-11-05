@@ -107,6 +107,18 @@ relay lint relay/connectors/jsonplaceholder/manifest.yaml
 
 Relay went through the same three-lens independent review as this portfolio's earlier Ledger project: a hiring manager (for the specific JD this targets), a senior platform engineer (code review), and an SRE/reliability engineer (production-readiness). Round 1 scores: 8/10, 7/10, 5/10. The SRE review surfaced real issues, not nitpicks — a resource leak (`ConnectorClient` never closed its HTTP client), retries that didn't cover transport-level failures, no jitter on backoff, and most importantly a drift-detector safety gap (short-key rename guesses could pass the similarity threshold on character-overlap coincidence alone, and an unreachable endpoint was indistinguishable from a real schema change). All of these were fixed for real — see "Design notes" above — and verified with the full test suite (105 tests) plus a live run against JSONPlaceholder.
 
+## Round 2: round-table review of the `relay dev`/`relay lint` extension
+
+Same three-lens process, run again against the local-dev-tooling extension specifically. Scores: hiring manager 7/10 (advance), senior platform engineer 6/10 (request changes), SRE/reliability 7/10 (safe to merge as dev-only tooling). The senior-engineer pass caught a real, verified bug: cursor-style pagination with no `items_path` computed the next cursor into a throwaway dict and then discarded it, so a connector using that (legal) manifest shape would silently look like it had only one page against the mock server. Also caught: the "single object vs. list" heuristic mis-classified a list endpoint nested under a path param (e.g. `/repos/{owner}/{repo}/issues`) as get-one, and the mock server never checked `EndpointSpec.method`, so a GET could wrongly match a POST-only endpoint's path. The SRE pass flagged two lower-severity hardening gaps: no `SIGTERM` handler (only `KeyboardInterrupt`), and no warning when `--base-url` points somewhere other than the manifest's own host even though it still carries real credentials.
+
+All four were fixed for real, not just acknowledged:
+- Cursor pagination with no `items_path` now generates a single synthetic item per page (matching how `ConnectorClient._extract_items` actually treats a non-list dict body) with the next cursor written into that same dict, instead of a list with nowhere to put one.
+- The single-object heuristic now also checks whether the endpoint declares pagination — a path placeholder alone no longer overrides an endpoint that's clearly a list.
+- `do_GET` skips any endpoint whose declared method isn't `GET` before matching on path.
+- `relay dev` now installs its `SIGTERM` handler before the server starts (not after the startup banner prints, which left a real — if narrow — race), and `relay test`/`relay drift-check` print a loud warning when `--base-url`'s host differs from the manifest's own.
+
+Verified with 8 new tests covering each fix directly, including a subprocess-level test that sends a real `SIGTERM` to a running `relay dev` process and checks for a clean exit and graceful shutdown message, and a contract test proving the cursor-pagination fix against the real `ConnectorClient` over a real socket. Full suite: 111 tests, all passing, `ruff check .` clean.
+
 ## Running tests
 
 ```bash
@@ -116,7 +128,7 @@ pytest tests/unit tests/contract -m "not live"
 pytest tests/contract -m live   # hits the real JSONPlaceholder API; needs network
 ```
 
-105 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation, and the `relay dev`/`relay lint` extension (synthetic data generation, the mock server across all pagination styles plus single-object endpoints, `--simulate-drift`, policy lint checks, and an end-to-end test combining the mock server with the real `ConnectorClient` and `drift_detector`).
+111 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation; and the `relay dev`/`relay lint` extension (synthetic data generation, the mock server across all pagination styles plus single-object endpoints and method checking, `--simulate-drift`, the `--base-url` host-mismatch warning, policy lint checks, a subprocess-level SIGTERM test against a running `relay dev` process, and end-to-end tests combining the mock server with the real `ConnectorClient` and `drift_detector`).
 
 ## Docker
 

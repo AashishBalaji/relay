@@ -20,7 +20,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from relay.dev.generate import build_synthetic_page, set_path
+from relay.dev.generate import build_synthetic_item, build_synthetic_page, set_path
 from relay.manifest.schema import ConnectorManifest, EndpointSpec
 
 _DEFAULT_PAGE_SIZE = 5
@@ -35,10 +35,15 @@ def _path_regex(endpoint_path: str) -> re.Pattern:
 
 def _is_single_object_endpoint(endpoint: EndpointSpec) -> bool:
     # No explicit "returns one object vs. a list" flag exists on
-    # EndpointSpec, so this uses the same convention real APIs follow: a
-    # path with a placeholder ("/posts/{post_id}") is a get-one endpoint;
-    # one without is a list endpoint.
-    return "{" in endpoint.path
+    # EndpointSpec, so this combines two signals rather than trusting either
+    # alone: a path with a placeholder ("/posts/{post_id}") is normally a
+    # get-one endpoint -- but a placeholder alone isn't enough, since list
+    # endpoints are routinely nested under a path param too
+    # ("/repos/{owner}/{repo}/issues" is a list). An endpoint that declares
+    # pagination is unambiguously a list endpoint regardless of its path.
+    pagination = endpoint.pagination
+    is_paginated = pagination is not None and pagination.style != "none"
+    return "{" in endpoint.path and not is_paginated
 
 
 def _build_list_body(
@@ -46,13 +51,24 @@ def _build_list_body(
 ) -> tuple[dict | list, bool]:
     """Returns (body, has_more). `has_more` tells the caller whether a
     cursor-style response should advertise a next page."""
-    items = build_synthetic_page(endpoint, page_index, _DEFAULT_PAGE_SIZE, rename=rename)
-    has_more = page_index + 1 < pages
     pagination = endpoint.pagination
+    has_more = page_index + 1 < pages
     if pagination and pagination.items_path:
+        items = build_synthetic_page(endpoint, page_index, _DEFAULT_PAGE_SIZE, rename=rename)
         body: dict = {}
         set_path(body, pagination.items_path, items)
         return body, has_more
+    if pagination and pagination.style == "cursor":
+        # Without an items_path, ConnectorClient's _extract_items treats a
+        # dict response body as a SINGLE raw item, not a list -- so a
+        # cursor-paginated endpoint with no items_path is "one item per
+        # page" in the real client, and the next cursor has to live in that
+        # same dict alongside the item's own fields. There's nowhere to put
+        # a cursor in a bare list, which is what this used to (wrongly)
+        # generate here.
+        item = build_synthetic_item(endpoint.fields, page_index, rename=rename)
+        return item, has_more
+    items = build_synthetic_page(endpoint, page_index, _DEFAULT_PAGE_SIZE, rename=rename)
     return items, has_more
 
 
@@ -70,6 +86,12 @@ class _MockHandler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
         for endpoint in manifest.endpoints:
+            if endpoint.method != "GET":
+                # A path match alone isn't enough -- a POST-only endpoint
+                # sharing a path with no GET sibling must not be served on
+                # GET, or every write-only endpoint would silently look
+                # readable through the mock server.
+                continue
             match = _path_regex(endpoint.path).match(parsed.path)
             if not match:
                 continue
@@ -112,8 +134,16 @@ class _MockHandler(BaseHTTPRequestHandler):
                 cursor = query.get(pagination.param_name)
                 page_index = int(cursor) if cursor is not None else 0
 
+            # A dict-shaped empty page whenever the response body has to be
+            # a dict at all (items nested under items_path, or a cursor
+            # endpoint with no items_path where the body IS a single item)
+            # -- otherwise a bare empty list, matching _build_list_body's
+            # own shape choice below.
+            body_is_dict = bool(
+                pagination and (pagination.items_path or pagination.style == "cursor")
+            )
             if page_index >= pages:
-                empty_body: dict | list = [] if not (pagination and pagination.items_path) else {}
+                empty_body: dict | list = {} if body_is_dict else []
                 if pagination and pagination.items_path:
                     set_path(empty_body, pagination.items_path, [])
                 self._send_json(200, empty_body)
@@ -121,10 +151,13 @@ class _MockHandler(BaseHTTPRequestHandler):
 
             body, has_more = _build_list_body(endpoint, page_index, pages, rename)
             if pagination and pagination.style == "cursor" and pagination.next_token_path:
+                # _build_list_body guarantees `body` is a dict whenever
+                # style is "cursor" (either items under items_path, or the
+                # single synthetic item itself), so the cursor always has
+                # somewhere real to live -- no more silently-discarded write
+                # into a throwaway dict.
                 next_cursor = str(page_index + 1) if has_more else None
-                target = body if isinstance(body, dict) else {}
-                set_path(target, pagination.next_token_path, next_cursor)
-                body = target if isinstance(body, dict) else body
+                set_path(body, pagination.next_token_path, next_cursor)
             self._send_json(200, body)
             return
 

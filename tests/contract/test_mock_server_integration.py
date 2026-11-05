@@ -46,6 +46,29 @@ def test_drift_check_against_mock_server_clean_run_has_no_findings():
     assert not report.has_drift
 
 
+def test_real_client_against_cursor_pagination_with_no_items_path():
+    """Regression test: a cursor-paginated endpoint with no items_path used
+    to have its next-cursor silently dropped by the mock server, so the
+    real client would stop after one page. The real client's own
+    _extract_items treats a dict body with no items_path as a single raw
+    item, so this is "one item per page" -- the mock server must still
+    advertise a real next cursor for subsequent pages to be fetched."""
+    pagination = PaginationSpec(style="cursor", param_name="cursor", next_token_path="next")
+    endpoint = EndpointSpec(
+        name="list_posts", path="/posts", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", required=True, type_hint="integer")},
+    )
+    manifest = ConnectorManifest(
+        name="demo", version="1.0.0", base_url="https://unused.example", endpoints=[endpoint]
+    )
+    with MockServer(manifest, pages=3) as server:
+        live_manifest = manifest.model_copy(update={"base_url": server.base_url})
+        with ConnectorClient(live_manifest) as client:
+            result = client.call("list_posts")
+    assert len(result) == 3
+    assert [item["id"] for item in result] == [0, 1, 2]
+
+
 def test_simulate_drift_flag_is_actually_caught_by_the_real_drift_detector():
     """The whole point of --simulate-drift: prove locally, with zero real
     upstream involved, that drift-check would have caught a real break."""

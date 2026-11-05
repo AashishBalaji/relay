@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
 import yaml
@@ -56,6 +58,21 @@ def _resolve_credentials(manifest_name: str, explicit: tuple[str, ...]) -> dict:
         if key not in credentials and env_name in os.environ:
             credentials[key] = os.environ[env_name]
     return credentials
+
+
+def _warn_if_base_url_host_differs(manifest, base_url: str) -> None:
+    """A `--base-url` override still sends the manifest's real credentials
+    -- the whole point for `relay dev` is 127.0.0.1, but a copy-paste
+    mistake (pasting a real endpoint instead of the mock server's) would
+    silently send real credentials to an arbitrary host with no sign
+    anything unusual happened. One loud line is cheap insurance."""
+    if urlparse(base_url).netloc != urlparse(manifest.base_url).netloc:
+        click.echo(
+            f"WARNING: --base-url ({base_url}) differs from manifest "
+            f"{manifest.name!r}'s own base_url ({manifest.base_url}) -- "
+            "its credentials will be sent to this URL instead.",
+            err=True,
+        )
 
 
 @click.group()
@@ -119,6 +136,7 @@ def test_endpoint(
         click.echo(f"INVALID MANIFEST: {exc}", err=True)
         raise SystemExit(1) from exc
     if base_url:
+        _warn_if_base_url_host_differs(manifest, base_url)
         manifest = manifest.model_copy(update={"base_url": base_url})
 
     credentials = _resolve_credentials(manifest.name, credential)
@@ -169,6 +187,8 @@ def drift_check(
     except ManifestError as exc:
         click.echo(f"INVALID MANIFEST: {exc}", err=True)
         raise SystemExit(1) from exc
+    if base_url:
+        _warn_if_base_url_host_differs(manifest, base_url)
     scan_manifest = manifest.model_copy(update={"base_url": base_url}) if base_url else manifest
 
     endpoint_names = list(endpoints) or [e.name for e in manifest.endpoints if "{" not in e.path]
@@ -241,19 +261,34 @@ def dev(manifest_path: str, port: int, pages: int, simulate_drift_on: str | None
         click.echo(f"INVALID MANIFEST: {exc}", err=True)
         raise SystemExit(1) from exc
 
-    server_kwargs = {"port": port, "pages": pages, "simulate_drift_on": simulate_drift_on}
-    with MockServer(manifest, **server_kwargs) as server:
-        click.echo(f"Mock server for {manifest.name!r} running at {server.base_url}")
-        click.echo(f"  relay test {manifest_path} <endpoint> --base-url {server.base_url}")
-        click.echo(f"  relay drift-check {manifest_path} --base-url {server.base_url}")
-        if simulate_drift_on:
-            click.echo(f"  (simulating a rename of {simulate_drift_on!r} in every response)")
-        click.echo("Press Ctrl+C to stop.")
-        try:
-            while True:
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            click.echo("\nStopping mock server.")
+    # A SIGTERM (process-manager stop, `kill <pid>`, a container stop)
+    # bypasses KeyboardInterrupt entirely, which would skip the `with`
+    # block's close() below -- harmless today only because the serving
+    # thread is a daemon and the OS reclaims the socket, but a graceful
+    # stop shouldn't depend on that. Registered BEFORE the server starts
+    # and anything is printed, so there's no window where a signal sent
+    # right after the startup banner appears could still hit Python's
+    # default (kill) disposition.
+    def _raise_keyboard_interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous_handler = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        server_kwargs = {"port": port, "pages": pages, "simulate_drift_on": simulate_drift_on}
+        with MockServer(manifest, **server_kwargs) as server:
+            click.echo(f"Mock server for {manifest.name!r} running at {server.base_url}")
+            click.echo(f"  relay test {manifest_path} <endpoint> --base-url {server.base_url}")
+            click.echo(f"  relay drift-check {manifest_path} --base-url {server.base_url}")
+            if simulate_drift_on:
+                click.echo(f"  (simulating a rename of {simulate_drift_on!r} in every response)")
+            click.echo("Press Ctrl+C to stop.")
+            try:
+                while True:
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                click.echo("\nStopping mock server.")
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 if __name__ == "__main__":
