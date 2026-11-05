@@ -20,7 +20,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from relay.dev.generate import build_synthetic_item, build_synthetic_page, set_path
+from relay.dev.generate import (
+    build_synthetic_item,
+    build_synthetic_items_from,
+    build_synthetic_page,
+    set_path,
+)
 from relay.manifest.schema import ConnectorManifest, EndpointSpec
 
 _DEFAULT_PAGE_SIZE = 5
@@ -67,15 +72,28 @@ def _effective_page_size(pagination) -> int:
 
 
 def _build_list_body(
-    endpoint: EndpointSpec, page_index: int, pages: int, rename: tuple[str, str] | None
+    endpoint: EndpointSpec,
+    page_index: int,
+    pages: int,
+    rename: tuple[str, str] | None,
+    start_override: int | None = None,
 ) -> tuple[dict | list, bool]:
     """Returns (body, has_more). `has_more` tells the caller whether a
-    cursor-style response should advertise a next page."""
+    cursor-style response should advertise a next page.
+
+    `start_override`, when given, is the exact item index to start from --
+    needed for offset-style pagination, where the query param IS the real
+    starting index and `page_index * page_size` (the usual way to compute a
+    start) would round a page-size-unaligned offset down to the wrong
+    item. Page- and cursor-style pagination have no such raw index to
+    preserve, so they leave this unset and fall back to the page_index-based
+    start exactly as before."""
     pagination = endpoint.pagination
     has_more = page_index + 1 < pages
     page_size = _effective_page_size(pagination)
+    start = start_override if start_override is not None else page_index * page_size
     if pagination and pagination.items_path:
-        items = build_synthetic_page(endpoint, page_index, page_size, rename=rename)
+        items = build_synthetic_items_from(endpoint, start, page_size, rename=rename)
         body: dict = {}
         set_path(body, pagination.items_path, items)
         return body, has_more
@@ -89,7 +107,7 @@ def _build_list_body(
         # generate here.
         item = build_synthetic_item(endpoint.fields, page_index, rename=rename)
         return item, has_more
-    items = build_synthetic_page(endpoint, page_index, page_size, rename=rename)
+    items = build_synthetic_items_from(endpoint, start, page_size, rename=rename)
     return items, has_more
 
 
@@ -148,10 +166,21 @@ class _MockHandler(BaseHTTPRequestHandler):
             pagination = endpoint.pagination
             page_size = _effective_page_size(pagination)
             page_index = 0
+            start_override = None
             if pagination and pagination.style == "page":
                 page_index = int(query.get(pagination.param_name, "1")) - 1
             elif pagination and pagination.style == "offset":
-                page_index = int(query.get(pagination.param_name, "0")) // page_size
+                # The query param here already IS the real starting index,
+                # not a page number -- page_index (a floor division) is
+                # still useful for the "exhausted all configured pages"
+                # check below, but using it to compute where items start
+                # would round a page-size-unaligned offset (e.g. offset=3
+                # with page_size=5) down to item 0 instead of item 3. Keep
+                # the raw offset around separately so _build_list_body can
+                # start exactly there.
+                raw_offset = int(query.get(pagination.param_name, "0"))
+                page_index = raw_offset // page_size
+                start_override = raw_offset
             elif pagination and pagination.style == "cursor":
                 cursor = query.get(pagination.param_name)
                 page_index = int(cursor) if cursor is not None else 0
@@ -171,7 +200,9 @@ class _MockHandler(BaseHTTPRequestHandler):
                 self._send_json(200, empty_body)
                 return
 
-            body, has_more = _build_list_body(endpoint, page_index, pages, rename)
+            body, has_more = _build_list_body(
+                endpoint, page_index, pages, rename, start_override=start_override
+            )
             if pagination and pagination.style == "cursor" and pagination.next_token_path:
                 # _build_list_body guarantees `body` is a dict whenever
                 # style is "cursor" (either items under items_path, or the

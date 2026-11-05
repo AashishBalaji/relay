@@ -128,6 +128,21 @@ def test_mock_server_honors_manifests_declared_page_size():
         assert [item["id"] for item in page2] == [2, 3]
 
 
+def test_offset_pagination_with_unaligned_offset_starts_at_the_exact_item():
+    """A client sending an offset that isn't a multiple of page_size (e.g.
+    offset=3 with page_size=5) must get items starting at index 3, not get
+    silently rounded down to 0 -- the query param IS the real starting
+    index, not a page number to floor-divide away."""
+    pagination = PaginationSpec(style="offset", param_name="offset", page_size=5)
+    endpoint = EndpointSpec(
+        name="list", path="/items", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", type_hint="integer")},
+    )
+    with MockServer(_manifest(endpoint), pages=2) as server:
+        body = httpx.get(f"{server.base_url}/items", params={"offset": 3}).json()
+        assert [item["id"] for item in body] == [3, 4, 5, 6, 7]
+
+
 def test_offset_pagination_honors_manifests_declared_page_size():
     pagination = PaginationSpec(style="offset", param_name="offset", page_size=2)
     endpoint = EndpointSpec(

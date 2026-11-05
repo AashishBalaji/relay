@@ -59,13 +59,24 @@ def build_synthetic_item(
     return item
 
 
+def build_synthetic_items_from(
+    endpoint: EndpointSpec, start: int, count: int, rename: tuple[str, str] | None = None
+) -> list[dict]:
+    """Builds `count` synthetic items starting at the EXACT index `start` --
+    the building block `build_synthetic_page` delegates to. Exists as its
+    own function so a caller that has a real starting offset in hand (e.g.
+    an offset-pagination query param) can use it directly, rather than
+    going through a page_index/page_size pair that only ever lands on
+    page-size-aligned starting points."""
+    return [
+        build_synthetic_item(endpoint.fields, start + i, rename=rename) for i in range(count)
+    ]
+
+
 def build_synthetic_page(
     endpoint: EndpointSpec, page_index: int, page_size: int, rename: tuple[str, str] | None = None
 ) -> list[dict]:
     """Builds one page's worth of synthetic items for an endpoint, with
     globally-increasing indices so items across pages are distinguishable
     (item 0..page_size-1 on page 0, page_size..2*page_size-1 on page 1, …)."""
-    start = page_index * page_size
-    return [
-        build_synthetic_item(endpoint.fields, start + i, rename=rename) for i in range(page_size)
-    ]
+    return build_synthetic_items_from(endpoint, page_index * page_size, page_size, rename=rename)

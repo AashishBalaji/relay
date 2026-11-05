@@ -131,6 +131,14 @@ Round 2's senior-engineer review (6/10) left a punch list even after the critica
 
 4 new tests plus one strengthened assertion on an existing test. Full suite: 115 tests, all passing, `ruff check .` clean.
 
+## Round 3 verification, and the one thing it found
+
+Re-ran the same three-lens review against the round-3 state, with each reviewer explicitly asked to verify the claimed fixes against the actual code rather than take this README's word for it. All three scores rose: hiring manager 7→8, senior engineer 6→8, SRE 7→8. Seven of the senior engineer's original eight checklist items were confirmed genuinely fixed with real tests; the eighth (the single-object heuristic's narrow remaining blind spot) was confirmed as an honestly-documented limitation rather than a hidden gap.
+
+The re-review also surfaced one new, real issue of its own: offset-style pagination computed each page's starting item as `page_index * page_size` (via a floor division on the raw offset), which silently rounded a page-size-*unaligned* offset down to the wrong item -- `offset=3` with `page_size=5` returned items starting at index 0, not 3. In practice `ConnectorClient` only ever sends aligned offsets itself, so this never bit the real end-to-end path, but a connector author poking at the mock server directly with an arbitrary offset would have gotten the wrong data silently. Fixed by keeping the raw offset value separate from the page-index used for pagination bookkeeping, and passing it straight through as the exact starting item index (`relay/dev/generate.py`'s `build_synthetic_items_from`, used by `_build_list_body`'s new `start_override`). Covered by a new test asserting the exact item sequence for an unaligned offset.
+
+Full suite: 116 tests, all passing, `ruff check .` clean.
+
 ## Running tests
 
 ```bash
@@ -140,7 +148,7 @@ pytest tests/unit tests/contract -m "not live"
 pytest tests/contract -m live   # hits the real JSONPlaceholder API; needs network
 ```
 
-115 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation; and the `relay dev`/`relay lint` extension (synthetic data generation, the mock server across all pagination styles -- including page-size fidelity to the manifest -- plus single-object endpoints and method checking, `--simulate-drift`, the `--base-url` host-mismatch warning, policy lint checks including the zero-fields error case, a subprocess-level SIGTERM test against a running `relay dev` process, and end-to-end tests combining the mock server with the real `ConnectorClient` and `drift_detector`).
+116 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation; and the `relay dev`/`relay lint` extension (synthetic data generation, the mock server across all pagination styles -- including page-size fidelity to the manifest and exact-offset correctness for unaligned offsets -- plus single-object endpoints and method checking, `--simulate-drift`, the `--base-url` host-mismatch warning, policy lint checks including the zero-fields error case, a subprocess-level SIGTERM test against a running `relay dev` process, and end-to-end tests combining the mock server with the real `ConnectorClient` and `drift_detector`).
 
 ## Docker
 
