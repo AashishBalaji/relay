@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import click
@@ -19,6 +20,8 @@ from relay.client.connector_client import (
     UpstreamConnectionError,
     UpstreamError,
 )
+from relay.dev.mock_server import MockServer
+from relay.dev.policy_lint import lint_manifest
 from relay.manifest.loader import ManifestError, load_manifest
 
 _TEMPLATE = """\
@@ -95,11 +98,17 @@ def validate(manifest_path: str):
 @click.argument("endpoint_name")
 @click.option("--credential", "-c", multiple=True, help="key=value, e.g. -c api_key=abc123")
 @click.option("--path-param", "-p", multiple=True, help="key=value for path interpolation")
+@click.option(
+    "--base-url",
+    help="Call this base URL instead of the manifest's (e.g. a local `relay dev` mock server), "
+    "without editing the manifest file",
+)
 def test_endpoint(
     manifest_path: str,
     endpoint_name: str,
     credential: tuple[str, ...],
     path_param: tuple[str, ...],
+    base_url: str | None,
 ) -> None:
     """Make a real call against one endpoint of a connector and print the
     normalized result -- the fastest way to sanity-check a manifest against
@@ -109,6 +118,8 @@ def test_endpoint(
     except ManifestError as exc:
         click.echo(f"INVALID MANIFEST: {exc}", err=True)
         raise SystemExit(1) from exc
+    if base_url:
+        manifest = manifest.model_copy(update={"base_url": base_url})
 
     credentials = _resolve_credentials(manifest.name, credential)
     path_params = dict(kv.split("=", 1) for kv in path_param)
@@ -137,12 +148,18 @@ def test_endpoint(
     "--apply-safe-patches", "apply_patches", is_flag=True,
     help="Write safe fixes back into the manifest file",
 )
+@click.option(
+    "--base-url",
+    help="Scan this base URL instead of the manifest's (e.g. a local `relay dev` mock server), "
+    "without editing the manifest file",
+)
 def drift_check(
     manifest_path: str,
     credential: tuple[str, ...],
     endpoints: tuple[str, ...],
     path_params_json: str | None,
     apply_patches: bool,
+    base_url: str | None,
 ) -> None:
     """Scan a connector's endpoints for drift against its manifest, print a
     structured report, and optionally patch the manifest file in place for
@@ -152,12 +169,13 @@ def drift_check(
     except ManifestError as exc:
         click.echo(f"INVALID MANIFEST: {exc}", err=True)
         raise SystemExit(1) from exc
+    scan_manifest = manifest.model_copy(update={"base_url": base_url}) if base_url else manifest
 
     endpoint_names = list(endpoints) or [e.name for e in manifest.endpoints if "{" not in e.path]
     path_params_by_endpoint = json.loads(path_params_json) if path_params_json else {}
 
     credentials = _resolve_credentials(manifest.name, credential)
-    with ConnectorClient(manifest, credentials=credentials) as client:
+    with ConnectorClient(scan_manifest, credentials=credentials) as client:
         report = scan_connector(
             client, endpoint_names=endpoint_names, path_params_by_endpoint=path_params_by_endpoint
         )
@@ -176,6 +194,66 @@ def drift_check(
     # from "upstream was down", but both still need attention.
     if report.unsafe_drifts or report.unreachable_endpoints:
         raise SystemExit(1)
+
+
+@cli.command("lint")
+@click.argument("manifest_path")
+def lint(manifest_path: str) -> None:
+    """Check a manifest against platform policy (sane rate limits/retries,
+    at least one required field per endpoint, no embedded-looking
+    credentials) -- the kind of automated check a real App Shop would run
+    before admitting a connector, run locally before anyone has to ask."""
+    try:
+        manifest = load_manifest(manifest_path)
+    except ManifestError as exc:
+        click.echo(f"INVALID MANIFEST: {exc}", err=True)
+        raise SystemExit(1) from exc
+
+    findings = lint_manifest(manifest)
+    if not findings:
+        click.echo(f"OK: {manifest.name} passes policy lint, no findings")
+        return
+
+    errors = [f for f in findings if f.severity == "error"]
+    for f in findings:
+        click.echo(f"[{f.severity.upper()}] {f.check}: {f.message}")
+    if errors:
+        raise SystemExit(1)
+
+
+@cli.command("dev")
+@click.argument("manifest_path")
+@click.option("--port", default=0, help="Port to bind (default: pick a free one)")
+@click.option("--pages", default=2, help="How many pages of synthetic data to serve before 'none'")
+@click.option(
+    "--simulate-drift", "simulate_drift_on",
+    help="Rename this field's last path segment in generated responses, to prove "
+    "`relay drift-check --base-url ...` actually catches it",
+)
+def dev(manifest_path: str, port: int, pages: int, simulate_drift_on: str | None) -> None:
+    """Run a local mock server serving synthetic data shaped by this
+    manifest's own field declarations -- no fixtures to write, no real
+    upstream needed. Point `relay test`/`relay drift-check` at it with
+    `--base-url` while building or changing a connector."""
+    try:
+        manifest = load_manifest(manifest_path)
+    except ManifestError as exc:
+        click.echo(f"INVALID MANIFEST: {exc}", err=True)
+        raise SystemExit(1) from exc
+
+    server_kwargs = {"port": port, "pages": pages, "simulate_drift_on": simulate_drift_on}
+    with MockServer(manifest, **server_kwargs) as server:
+        click.echo(f"Mock server for {manifest.name!r} running at {server.base_url}")
+        click.echo(f"  relay test {manifest_path} <endpoint> --base-url {server.base_url}")
+        click.echo(f"  relay drift-check {manifest_path} --base-url {server.base_url}")
+        if simulate_drift_on:
+            click.echo(f"  (simulating a rename of {simulate_drift_on!r} in every response)")
+        click.echo("Press Ctrl+C to stop.")
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            click.echo("\nStopping mock server.")
 
 
 if __name__ == "__main__":
