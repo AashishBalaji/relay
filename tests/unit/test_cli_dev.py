@@ -18,6 +18,9 @@ def test_lint_clean_manifest_exits_zero(tmp_path):
     result = CliRunner().invoke(cli, ["lint", str(manifest_path)])
     assert result.exit_code == 0
     assert "OK" in result.output
+    # A clean pass says nothing about secrets found, not that none exist --
+    # a team CI-gating on this command shouldn't over-trust a clean run.
+    assert "pattern-based" in result.output
 
 
 def test_lint_error_finding_exits_nonzero(tmp_path):

@@ -96,6 +96,51 @@ def test_get_request_to_post_only_endpoint_path_returns_404_not_200():
         assert r.status_code == 404
 
 
+def test_offset_pagination_serves_configured_pages_then_empty():
+    pagination = PaginationSpec(style="offset", param_name="offset")
+    endpoint = EndpointSpec(
+        name="list", path="/items", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", type_hint="integer")},
+    )
+    with MockServer(_manifest(endpoint), pages=2) as server:
+        page1 = httpx.get(f"{server.base_url}/items", params={"offset": 0}).json()
+        page2 = httpx.get(f"{server.base_url}/items", params={"offset": 5}).json()
+        page3 = httpx.get(f"{server.base_url}/items", params={"offset": 10}).json()
+        assert [item["id"] for item in page1] == [0, 1, 2, 3, 4]
+        assert [item["id"] for item in page2] == [5, 6, 7, 8, 9]
+        assert page3 == []
+
+
+def test_mock_server_honors_manifests_declared_page_size():
+    """The server used to always serve a hardcoded page size regardless of
+    what the manifest itself declared -- a fidelity gap, since the whole
+    pitch of this tool is that responses are shaped exactly like what the
+    manifest says the API returns."""
+    pagination = PaginationSpec(style="page", param_name="page", page_size=2)
+    endpoint = EndpointSpec(
+        name="list", path="/items", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", type_hint="integer")},
+    )
+    with MockServer(_manifest(endpoint), pages=2) as server:
+        page1 = httpx.get(f"{server.base_url}/items", params={"page": 1}).json()
+        page2 = httpx.get(f"{server.base_url}/items", params={"page": 2}).json()
+        assert [item["id"] for item in page1] == [0, 1]
+        assert [item["id"] for item in page2] == [2, 3]
+
+
+def test_offset_pagination_honors_manifests_declared_page_size():
+    pagination = PaginationSpec(style="offset", param_name="offset", page_size=2)
+    endpoint = EndpointSpec(
+        name="list", path="/items", pagination=pagination,
+        fields={"id": FieldMapping(source_path="id", type_hint="integer")},
+    )
+    with MockServer(_manifest(endpoint), pages=2) as server:
+        page1 = httpx.get(f"{server.base_url}/items", params={"offset": 0}).json()
+        page2 = httpx.get(f"{server.base_url}/items", params={"offset": 2}).json()
+        assert [item["id"] for item in page1] == [0, 1]
+        assert [item["id"] for item in page2] == [2, 3]
+
+
 def test_cursor_pagination_without_items_path_advertises_next_cursor():
     """Without items_path, ConnectorClient's _extract_items treats a dict
     body as a SINGLE item -- so the next cursor has to live in that same

@@ -232,6 +232,19 @@ def lint(manifest_path: str) -> None:
     findings = lint_manifest(manifest)
     if not findings:
         click.echo(f"OK: {manifest.name} passes policy lint, no findings")
+        # A clean pass says nothing about secrets found, not that none
+        # exist -- the embedded-secret check is a pattern match on a
+        # handful of known prefixes, not a real secret scanner. Printing
+        # this only on the "no findings" path matters most here: when a
+        # finding DOES fire, its own message already carries the same
+        # caveat, but a clean run is exactly the result a CI gate would be
+        # tempted to over-trust.
+        click.echo(
+            "Note: the embedded-secret check is pattern-based (a handful of known "
+            "credential prefixes), not a full secret scanner -- it can miss real secrets "
+            "that don't match those patterns. Use a dedicated secret scanner for anything "
+            "that matters."
+        )
         return
 
     errors = [f for f in findings if f.severity == "error"]

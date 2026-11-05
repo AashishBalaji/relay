@@ -62,7 +62,22 @@ def _check_retries(manifest: ConnectorManifest) -> list[LintFinding]:
 def _check_required_fields(manifest: ConnectorManifest) -> list[LintFinding]:
     findings = []
     for endpoint in manifest.endpoints:
-        if endpoint.fields and not any(f.required for f in endpoint.fields.values()):
+        if not endpoint.fields:
+            # Worse than "no required fields": there's no field mapping at
+            # all, so there's nothing for the client to extract and nothing
+            # for the drift detector to even check a path against. This is
+            # an error, not a warning -- a warning would put it in the same
+            # bucket as "some fields declared, just none required", which
+            # understates how unusable the endpoint actually is right now.
+            findings.append(
+                LintFinding(
+                    "error", "required_fields",
+                    f"endpoint {endpoint.name!r} declares no fields at all -- the client has "
+                    "nothing to extract and the drift detector has nothing to check; this "
+                    "endpoint can't be validated or monitored until at least one field is added",
+                )
+            )
+        elif not any(f.required for f in endpoint.fields.values()):
             findings.append(
                 LintFinding(
                     "warning", "required_fields",

@@ -41,9 +41,29 @@ def _is_single_object_endpoint(endpoint: EndpointSpec) -> bool:
     # endpoints are routinely nested under a path param too
     # ("/repos/{owner}/{repo}/issues" is a list). An endpoint that declares
     # pagination is unambiguously a list endpoint regardless of its path.
+    #
+    # Known remaining gap: a list endpoint nested under a path param that
+    # is ALSO not paginated (e.g. "/users/{user_id}/roles" returning every
+    # role with no pagination at all) still has no signal to distinguish
+    # it from a true get-one endpoint and will be misclassified here. This
+    # is a real, if narrow, blind spot -- not an oversight -- because
+    # EndpointSpec has no explicit single-vs-list flag to check instead;
+    # closing it properly needs a schema change, not a cleverer heuristic.
     pagination = endpoint.pagination
     is_paginated = pagination is not None and pagination.style != "none"
     return "{" in endpoint.path and not is_paginated
+
+
+def _effective_page_size(pagination) -> int:
+    # Honor the manifest's own declared page size when it states one --
+    # serving a different size than the manifest describes would be a
+    # fidelity gap (it happens to still "work" against the real client,
+    # which tracks progress by items-returned rather than a fixed page
+    # size, but that's an accident of the client's implementation, not a
+    # reason for the mock server to ignore what the manifest says).
+    if pagination and pagination.page_size:
+        return pagination.page_size
+    return _DEFAULT_PAGE_SIZE
 
 
 def _build_list_body(
@@ -53,8 +73,9 @@ def _build_list_body(
     cursor-style response should advertise a next page."""
     pagination = endpoint.pagination
     has_more = page_index + 1 < pages
+    page_size = _effective_page_size(pagination)
     if pagination and pagination.items_path:
-        items = build_synthetic_page(endpoint, page_index, _DEFAULT_PAGE_SIZE, rename=rename)
+        items = build_synthetic_page(endpoint, page_index, page_size, rename=rename)
         body: dict = {}
         set_path(body, pagination.items_path, items)
         return body, has_more
@@ -68,7 +89,7 @@ def _build_list_body(
         # generate here.
         item = build_synthetic_item(endpoint.fields, page_index, rename=rename)
         return item, has_more
-    items = build_synthetic_page(endpoint, page_index, _DEFAULT_PAGE_SIZE, rename=rename)
+    items = build_synthetic_page(endpoint, page_index, page_size, rename=rename)
     return items, has_more
 
 
@@ -125,11 +146,12 @@ class _MockHandler(BaseHTTPRequestHandler):
                 return
 
             pagination = endpoint.pagination
+            page_size = _effective_page_size(pagination)
             page_index = 0
             if pagination and pagination.style == "page":
                 page_index = int(query.get(pagination.param_name, "1")) - 1
             elif pagination and pagination.style == "offset":
-                page_index = int(query.get(pagination.param_name, "0")) // _DEFAULT_PAGE_SIZE
+                page_index = int(query.get(pagination.param_name, "0")) // page_size
             elif pagination and pagination.style == "cursor":
                 cursor = query.get(pagination.param_name)
                 page_index = int(cursor) if cursor is not None else 0

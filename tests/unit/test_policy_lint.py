@@ -47,6 +47,17 @@ def test_endpoint_with_a_required_field_is_not_flagged():
     assert not any(f.check == "required_fields" for f in lint_manifest(_manifest(endpoint=endpoint)))
 
 
+def test_endpoint_with_zero_fields_is_an_error_not_a_warning():
+    """Worse than 'no required fields': there's no field mapping at all,
+    so neither the client nor the drift detector has anything to check --
+    this deserves a harder failure than the no-required-fields warning."""
+    endpoint = EndpointSpec(name="list", path="/items", fields={})
+    findings = lint_manifest(_manifest(endpoint=endpoint))
+    matches = [f for f in findings if f.check == "required_fields"]
+    assert len(matches) == 1
+    assert matches[0].severity == "error"
+
+
 def test_suspicious_value_in_auth_is_flagged_as_embedded_secret():
     auth = ApiKeyAuth(name="Authorization", location="header", value_prefix="Bearer eyFAKE")
     findings = lint_manifest(_manifest(auth=auth))

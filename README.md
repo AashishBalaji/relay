@@ -119,6 +119,18 @@ All four were fixed for real, not just acknowledged:
 
 Verified with 8 new tests covering each fix directly, including a subprocess-level test that sends a real `SIGTERM` to a running `relay dev` process and checks for a clean exit and graceful shutdown message, and a contract test proving the cursor-pagination fix against the real `ConnectorClient` over a real socket. Full suite: 111 tests, all passing, `ruff check .` clean.
 
+## Round 3: closing the remaining gaps from round 2
+
+Round 2's senior-engineer review (6/10) left a punch list even after the critical bugs were fixed: the mock server ignored the manifest's own declared page size, the single-object heuristic still had one documented-but-unaddressed blind spot, offset-style pagination had no dedicated test, an endpoint with literally zero declared fields wasn't distinguished from one with fields but none required, and the secret-scanner's pattern-based scope was only disclosed when it actually flagged something -- never on a clean pass, which is exactly the result a CI gate would be tempted to over-trust. All five addressed:
+
+- **Mock server now honors `pagination.page_size`** when the manifest declares one, instead of a hardcoded page size regardless of what the manifest says -- this "worked" before only because `ConnectorClient` tracks pagination progress by items-returned rather than a fixed size, which was an accident of the client's implementation, not a reason for the mock server to ignore the manifest.
+- **The single-object-vs-list heuristic's remaining blind spot is now documented in the code itself**, not just known: a non-paginated list endpoint nested under a path param (e.g. `/users/{user_id}/roles` with no pagination at all) still has no signal to distinguish it from a true get-one endpoint, and closing that properly needs a schema change (an explicit flag), not a cleverer heuristic.
+- **`relay lint` now flags an endpoint with zero declared fields as an error**, not lumped in with the (warning-level) "fields declared but none required" case -- there's a real difference between "drift detection has nothing to notice a break with" and "there's nothing here to extract or check at all."
+- **`relay lint`'s clean-pass output now states the secret check's pattern-based scope up front**, not only inside a finding that happens to fire -- so a team scripting against a clean `relay lint` exit code sees the caveat every time, not only when something was already flagged.
+- Added the missing offset-pagination test, plus page-size-fidelity tests for both page- and offset-style pagination.
+
+4 new tests plus one strengthened assertion on an existing test. Full suite: 115 tests, all passing, `ruff check .` clean.
+
 ## Running tests
 
 ```bash
@@ -128,7 +140,7 @@ pytest tests/unit tests/contract -m "not live"
 pytest tests/contract -m live   # hits the real JSONPlaceholder API; needs network
 ```
 
-111 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation; and the `relay dev`/`relay lint` extension (synthetic data generation, the mock server across all pagination styles plus single-object endpoints and method checking, `--simulate-drift`, the `--base-url` host-mismatch warning, policy lint checks, a subprocess-level SIGTERM test against a running `relay dev` process, and end-to-end tests combining the mock server with the real `ConnectorClient` and `drift_detector`).
+115 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation; and the `relay dev`/`relay lint` extension (synthetic data generation, the mock server across all pagination styles -- including page-size fidelity to the manifest -- plus single-object endpoints and method checking, `--simulate-drift`, the `--base-url` host-mismatch warning, policy lint checks including the zero-fields error case, a subprocess-level SIGTERM test against a running `relay dev` process, and end-to-end tests combining the mock server with the real `ConnectorClient` and `drift_detector`).
 
 ## Docker
 
