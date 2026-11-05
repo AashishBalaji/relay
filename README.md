@@ -75,9 +75,15 @@ relay drift-check relay/connectors/jsonplaceholder/manifest.yaml
 
 ## Design notes worth knowing
 
-- **Why the drift detector is conservative on purpose**: a field rename from `user` to `author` on a real API correctly comes back as *unsafe*, not auto-patched — the string similarity (~0.40) is genuinely too low to be a confident match. A tool that silently auto-patched this would be dangerous. The detector's job is to flag plausible renames for human review, not guess blindly.
+- **Why the drift detector is conservative on purpose**: a field rename from `user` to `author` on a real API correctly comes back as *unsafe*, not auto-patched — the string similarity (~0.40) is genuinely too low to be a confident match. A tool that silently auto-patched this would be dangerous. The detector's job is to flag plausible renames for human review, not guess blindly. Short keys get an extra guard: a rename is never auto-classified "safe" below a minimum key length, because string-similarity on short strings is noisy (`"id"` vs `"uid"` scores 0.8 on character overlap alone, despite being an unreliable signal).
+- **Endpoint-unreachable vs. field-renamed are reported separately**: if an endpoint can't be called at all (auth failure, network error, 5xx after retries), that's a different situation from a schema change, and `DriftReport` keeps them apart (`unreachable_endpoints` vs. `unsafe_drifts`) so a consumer can tell "the connector is down" from "the schema changed" — both still fail CI loudly, but for different reasons.
 - **Separation of concerns**: `fetch_raw_items()` returns raw, un-mapped API responses; `call()` wraps it and applies field extraction. This split exists specifically so the drift detector can inspect raw response shapes without `call()`'s mapping step discarding the very data it needs.
+- **Resource cleanup and retries**: `ConnectorClient` supports `close()` / use as a context manager, closing only the HTTP client it created itself (never one injected by a caller who owns it). Retries cover transport-level failures (`ConnectError`, timeouts) in addition to retryable HTTP status codes, with full-jitter backoff so multiple connectors retrying a shared upstream after an outage don't retry in lockstep.
 - **What isn't live-tested, and why**: the GitHub OAuth2 connector needs a real access token, which this project doesn't have (no token was purchased/available) — it's tested via recorded fixtures instead. The Anthropic LLM client is real and callable, but exercising it against the live Anthropic API wasn't run here (no committed API key).
+
+## Round-table review
+
+Relay went through the same three-lens independent review as this portfolio's earlier Ledger project: a hiring manager (for the specific JD this targets), a senior platform engineer (code review), and an SRE/reliability engineer (production-readiness). Round 1 scores: 8/10, 7/10, 5/10. The SRE review surfaced real issues, not nitpicks — a resource leak (`ConnectorClient` never closed its HTTP client), retries that didn't cover transport-level failures, no jitter on backoff, and most importantly a drift-detector safety gap (short-key rename guesses could pass the similarity threshold on character-overlap coincidence alone, and an unreachable endpoint was indistinguishable from a real schema change). All of these were fixed for real — see "Design notes" above — and verified with the full test suite (81 tests) plus a live run against JSONPlaceholder.
 
 ## Running tests
 
@@ -88,7 +94,7 @@ pytest tests/unit tests/contract -m "not live"
 pytest tests/contract -m live   # hits the real JSONPlaceholder API; needs network
 ```
 
-75 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport), CLI commands, manifest generator (fake LLM), drift detector, and property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation.
+81 tests, all passing: unit tests for the manifest schema, field mapping, rate limiter, auth injection, HTTP client (mocked transport, including transport-error retries and resource cleanup), CLI commands, manifest generator (fake LLM), drift detector (including the short-key safety guard and unreachable-vs-drifted classification), and property-based tests (Hypothesis) for the field-mapping round trip, the rate limiter's sliding-window invariant, and manifest version validation.
 
 ## Docker
 

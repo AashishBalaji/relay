@@ -69,7 +69,11 @@ def test_field_removed_outright_is_unsafe_with_no_suggestion():
     assert drift.suggested_path is None
 
 
-def test_endpoint_call_failure_reported_as_unsafe_drift():
+def test_endpoint_call_failure_reported_as_unreachable_not_unsafe():
+    """A connectivity failure (auth error, 5xx, network blip) is a
+    different situation from a renamed field -- a consumer paging on
+    results needs to tell "connector is down" from "schema changed",
+    so this is its own classification, not folded into unsafe_drifts."""
     def handler(request):
         return httpx.Response(500)
 
@@ -82,7 +86,23 @@ def test_endpoint_call_failure_reported_as_unsafe_drift():
     )
     report = scan_connector(client)
     assert report.has_drift
-    assert "endpoint call failed" in report.drifts[0].reason
+    assert len(report.unreachable_endpoints) == 1
+    assert report.unsafe_drifts == []
+    assert "endpoint call failed" in report.unreachable_endpoints[0].reason
+
+
+def test_short_key_rename_never_classified_safe():
+    """difflib similarity on short keys is noisy ("id" vs "uid" scores
+    0.8) -- a rename guess on a key shorter than the safety floor must
+    never be auto-patchable, however high its similarity score."""
+    endpoint = EndpointSpec(
+        name="list", path="/items",
+        fields={"id": FieldMapping(source_path="id", required=True)},
+    )
+    client = _client(endpoint, [{"uid": 1, "name": "x"}])  # "id" -> "uid", short-key coincidence
+    report = scan_connector(client)
+    assert report.has_drift
+    assert report.drifts[0].confidence == "unsafe"
 
 
 def test_apply_safe_patches_updates_source_path_only_for_safe_drifts():

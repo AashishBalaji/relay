@@ -13,7 +13,12 @@ import click
 import yaml
 
 from relay.agents.drift_detector import apply_safe_patches, scan_connector
-from relay.client.connector_client import ConnectorClient, MissingRequiredFieldsError, UpstreamError
+from relay.client.connector_client import (
+    ConnectorClient,
+    MissingRequiredFieldsError,
+    UpstreamConnectionError,
+    UpstreamError,
+)
 from relay.manifest.loader import ManifestError, load_manifest
 
 _TEMPLATE = """\
@@ -108,12 +113,12 @@ def test_endpoint(
     credentials = _resolve_credentials(manifest.name, credential)
     path_params = dict(kv.split("=", 1) for kv in path_param)
 
-    client = ConnectorClient(manifest, credentials=credentials)
-    try:
-        result = client.call(endpoint_name, path_params=path_params)
-    except (UpstreamError, MissingRequiredFieldsError) as exc:
-        click.echo(f"FAILED: {exc}", err=True)
-        raise SystemExit(1) from exc
+    with ConnectorClient(manifest, credentials=credentials) as client:
+        try:
+            result = client.call(endpoint_name, path_params=path_params)
+        except (UpstreamError, UpstreamConnectionError, MissingRequiredFieldsError) as exc:
+            click.echo(f"FAILED: {exc}", err=True)
+            raise SystemExit(1) from exc
     click.echo(json.dumps(result, indent=2, default=str))
 
 
@@ -152,10 +157,10 @@ def drift_check(
     path_params_by_endpoint = json.loads(path_params_json) if path_params_json else {}
 
     credentials = _resolve_credentials(manifest.name, credential)
-    client = ConnectorClient(manifest, credentials=credentials)
-    report = scan_connector(
-        client, endpoint_names=endpoint_names, path_params_by_endpoint=path_params_by_endpoint
-    )
+    with ConnectorClient(manifest, credentials=credentials) as client:
+        report = scan_connector(
+            client, endpoint_names=endpoint_names, path_params_by_endpoint=path_params_by_endpoint
+        )
     click.echo(report.to_markdown())
 
     if report.safe_drifts and apply_patches:
@@ -165,8 +170,12 @@ def drift_check(
         )
         click.echo(f"Applied {len(report.safe_drifts)} safe patch(es) to {manifest_path}")
 
-    if report.unsafe_drifts:
-        raise SystemExit(1)  # CI should fail loudly on anything needing a human
+    # CI should fail loudly both on drift that needs a human AND on an
+    # endpoint that couldn't be reached at all -- the two are reported
+    # separately (see DriftReport) so a consumer can tell "schema changed"
+    # from "upstream was down", but both still need attention.
+    if report.unsafe_drifts or report.unreachable_endpoints:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

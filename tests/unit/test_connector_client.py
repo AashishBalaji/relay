@@ -3,7 +3,12 @@ import base64
 import httpx
 import pytest
 
-from relay.client.connector_client import ConnectorClient, MissingRequiredFieldsError, UpstreamError
+from relay.client.connector_client import (
+    ConnectorClient,
+    MissingRequiredFieldsError,
+    UpstreamConnectionError,
+    UpstreamError,
+)
 from relay.manifest.schema import (
     ApiKeyAuth,
     BasicAuth,
@@ -207,6 +212,61 @@ def test_basic_auth_reaches_upstream_request():
     client.call("list")
     expected = "Basic " + base64.b64encode(b"u:p").decode()
     assert seen["auth_header"] == expected
+
+
+def test_close_closes_self_created_http_client():
+    endpoint = EndpointSpec(name="list", path="/items", fields={})
+    client = ConnectorClient(make_manifest([endpoint]))  # no http_client injected -- owns its own
+    assert not client.http.is_closed
+    client.close()
+    assert client.http.is_closed
+
+
+def test_close_does_not_close_an_injected_http_client():
+    endpoint = EndpointSpec(name="list", path="/items", fields={})
+    injected = httpx.Client(base_url="https://api.test")
+    client = client_with(lambda request: httpx.Response(200, json=[]), make_manifest([endpoint]))
+    client.http = injected  # swap in an injected client to prove ownership, not identity
+    client._owns_http_client = False
+    client.close()
+    assert not injected.is_closed
+    injected.close()
+
+
+def test_context_manager_closes_on_exit():
+    endpoint = EndpointSpec(name="list", path="/items", fields={})
+    manifest = make_manifest([endpoint])
+    with ConnectorClient(manifest) as client:
+        http = client.http
+        assert not http.is_closed
+    assert http.is_closed
+
+
+def test_transport_error_is_retried_then_succeeds():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ConnectError("boom")
+        return httpx.Response(200, json=[{"id": 1}])
+
+    endpoint = EndpointSpec(name="list", path="/items", fields={"id": FieldMapping(source_path="id")})
+    sleeps = []
+    client = client_with(handler, make_manifest([endpoint], max_retries=5), sleep=sleeps.append)
+    assert client.call("list") == [{"id": 1}]
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+
+
+def test_transport_error_exhausted_raises_upstream_connection_error():
+    def handler(request):
+        raise httpx.ConnectError("boom")
+
+    endpoint = EndpointSpec(name="list", path="/items", fields={})
+    client = client_with(handler, make_manifest([endpoint], max_retries=2))
+    with pytest.raises(UpstreamConnectionError):
+        client.call("list")
 
 
 def test_rate_limiter_is_consulted_per_request():

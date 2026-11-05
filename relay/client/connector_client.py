@@ -6,6 +6,7 @@ credentials and calls client.call(endpoint_name, ...).
 """
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
@@ -24,6 +25,18 @@ class UpstreamError(Exception):
     def __init__(self, response: httpx.Response):
         self.response = response
         super().__init__(f"{response.status_code} from {response.request.url}")
+
+
+class UpstreamConnectionError(Exception):
+    """Raised when a transport-level failure (connection refused, DNS
+    failure, timeout, TLS error, ...) persists after exhausting retries --
+    distinct from UpstreamError, which carries a real HTTP response. A
+    framework whose whole pitch is 'retry/backoff handled once, centrally'
+    has to cover this path too, not just bad status codes."""
+
+    def __init__(self, method: str, path: str, cause: Exception):
+        self.cause = cause
+        super().__init__(f"{method} {path} failed after retries: {cause!r}")
 
 
 class MissingRequiredFieldsError(Exception):
@@ -49,14 +62,35 @@ class ConnectorClient:
         http_client: httpx.Client | None = None,
         rate_limiter: RateLimiter | None = None,
         sleep=time.sleep,
+        jitter=random.random,
     ):
         self.manifest = manifest
         self.credentials = credentials or {}
+        # Only a client we create ourselves is ours to close -- an injected
+        # http_client is owned by whoever passed it in (e.g. a caller
+        # pooling connections across several ConnectorClients).
+        self._owns_http_client = http_client is None
         self.http = http_client or httpx.Client(base_url=manifest.base_url, timeout=10.0)
         self.rate_limiter = rate_limiter or RateLimiter(
             manifest.rate_limit_per_window, manifest.rate_limit_window_seconds
         )
         self._sleep = sleep
+        self._jitter = jitter
+
+    def close(self) -> None:
+        """Releases the underlying connection pool -- only if this client
+        created it. A long-running process that instantiates many
+        ConnectorClients (one per connector, say) needs this to avoid
+        leaking sockets; a one-shot CLI invocation doesn't strictly need
+        it, but calling it is always safe."""
+        if self._owns_http_client:
+            self.http.close()
+
+    def __enter__(self) -> ConnectorClient:
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
 
     def call(
         self,
@@ -110,7 +144,13 @@ class ConnectorClient:
             basic_auth = apply_auth(self.manifest.auth, self.credentials, headers, params)
 
             pagination = endpoint.pagination
-            if pagination and pagination.style != "none" and page_token is not None:
+            if pagination and pagination.style == "page":
+                # Send the param explicitly even on page 1 -- relying on the
+                # upstream API to default an omitted page param to 1 is an
+                # assumption, not a guarantee, and this framework's whole
+                # point is not leaving that kind of thing implicit.
+                params[pagination.param_name] = page_token or 1
+            elif pagination and pagination.style != "none" and page_token is not None:
                 params[pagination.param_name] = page_token
             if pagination and pagination.page_size_param and pagination.page_size:
                 params[pagination.page_size_param] = pagination.page_size
@@ -131,6 +171,11 @@ class ConnectorClient:
             if pagination.style == "cursor":
                 next_token = get_path(body, pagination.next_token_path)
                 if is_missing(next_token) or next_token is None:
+                    break
+                if next_token == page_token:
+                    # A buggy (but real-world) upstream can echo the same
+                    # cursor back forever -- stop here instead of burning
+                    # max_pages calls against it before giving up.
                     break
                 page_token = next_token
             elif pagination.style == "page":
@@ -153,15 +198,35 @@ class ConnectorClient:
             return body
         return [body]
 
+    def _backoff_seconds(self, attempt: int) -> float:
+        # Full jitter (per AWS's backoff guidance): a random value in
+        # [0, cap] rather than a fixed cap. Several connectors/workers
+        # retrying a shared upstream after an outage with identical,
+        # un-jittered backoff would all retry in lockstep -- a
+        # thundering herd against the very thing that just recovered.
+        cap = min(2**attempt, 30)
+        return self._jitter() * cap
+
     def _request_with_retry(self, method: str, path: str, **kwargs) -> httpx.Response:
         attempt = 0
         while True:
             self.rate_limiter.acquire()
-            response = self.http.request(method, path, **kwargs)
+            try:
+                response = self.http.request(method, path, **kwargs)
+            except httpx.TransportError as exc:
+                # A connection failure, timeout, or DNS blip is just as
+                # retryable as a 503 -- a framework whose selling point is
+                # "retry/backoff handled once, centrally" has to cover
+                # transport failures too, not only bad status codes.
+                if attempt < self.manifest.max_retries:
+                    attempt += 1
+                    self._sleep(self._backoff_seconds(attempt))
+                    continue
+                raise UpstreamConnectionError(method, path, exc) from exc
             if response.status_code < 400:
                 return response
             if response.status_code in _RETRYABLE_STATUS and attempt < self.manifest.max_retries:
                 attempt += 1
-                self._sleep(min(2**attempt, 30))
+                self._sleep(self._backoff_seconds(attempt))
                 continue
             raise UpstreamError(response)
